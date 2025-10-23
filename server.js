@@ -29,9 +29,41 @@
  const scoreConversionTables = { /* ... */ };
 
  // --- 3. Funciones Helper ---
- function sanitizeQuestions(questionData) { /* ... */ }
- function flattenQuestions(allQuestionData) { /* ... */ }
- function calculateStandardScore(testKey, correctAnswers) { /* ... */ }
+ function sanitizeQuestions(allQuestionData, allowedTests = []) {
+     // ***** ¡VERIFICACIÓN AÑADIDA! *****
+     if (!allQuestionData || typeof allQuestionData !== 'object') {
+         console.error("sanitizeQuestions: allQuestionData es inválido.");
+         return {};
+     }
+     if (!Array.isArray(allowedTests)) {
+         console.warn("sanitizeQuestions: allowedTests no es un array. Se usará array vacío.");
+         allowedTests = [];
+     }
+     // ***** FIN VERIFICACIÓN *****
+
+     const sanitizedBanks = {};
+     // Filter to include only tests the user is allowed to take
+     allowedTests.forEach(testKey => {
+         if (allQuestionData[testKey]) {
+             const testBank = allQuestionData[testKey];
+             // Asegurarse que testBank sea un array
+             if (Array.isArray(testBank)) {
+                 sanitizedBanks[testKey] = testBank.map(category => ({
+                     category: category.category,
+                     questions: Array.isArray(category.questions) ? category.questions.map(q => ({
+                         question: q.question,
+                         options: q.options,
+                         image: q.image || null
+                         // DO NOT send q.correct
+                     })) : []
+                 }));
+             }
+         }
+     });
+     return sanitizedBanks;
+ }
+ function flattenQuestions(allQuestionData) { /* ... (sin cambios) ... */ }
+ function calculateStandardScore(testKey, correctAnswers) { /* ... (sin cambios) ... */ }
 
  // --- 4. Configuración ---
  const app = express();
@@ -47,71 +79,43 @@
  console.log("--- Middlewares defined ---");
 
  // --- 6. Endpoints ---
- app.get('/', (req, res) => { console.log("--- GET / request received ---"); res.send('¡El servidor PAES 2026 está funcionando!'); });
+ app.get('/', (req, res) => { /* ... (sin cambios) ... */ });
+ app.post('/api/login', (req, res) => { /* ... (sin cambios) ... */ });
+ app.get('/api/session', authenticateToken, (req, res) => { /* ... (sin cambios) ... */ });
 
- app.post('/api/login', (req, res) => {
-     console.log(`--- POST /api/login request received at ${new Date().toISOString()} ---`);
+ // --- Endpoint /api/questions (AHORA MÁS ROBUSTO) ---
+ app.get('/api/questions', authenticateToken, isStudent, (req, res) => {
+     console.log("--- GET /api/questions request received ---");
      try {
-         const { loginUser, loginPass, deviceToken } = req.body;
-         console.log(`--- Attempting login for user: ${loginUser} ---`);
-         const user = users.find(u => (u.user === loginUser || u.email === loginUser) && u.password === loginPass);
+         const user = req.fullUser; // Adjuntado por el middleware isStudent
 
-         if (!user) { console.warn(`--- Login FAILED for ${loginUser}: Incorrect credentials ---`); return res.status(401).json({ message: 'Credenciales incorrectas.' }); }
-
-         const userInDb = users.find(u => u.id === user.id);
-         if (!userInDb) { console.error(`--- CRITICAL ERROR: User found but not in DB? ID: ${user.id} ---`); return res.status(500).json({ message: 'Error interno del servidor.' }); } // Added safety check
-
-         const payload = { id: user.id, role: user.role };
-         const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
-         const userResponse = { ...user };
-         delete userResponse.password;
-
-         if (user.role === 'student') {
-             const responseData = { user: userResponse, token: token }; // Init responseData here
-
-             // Escenario 1: Primer login
-             if (userInDb.deviceToken === null) {
-                 // ***** ¡CORRECCIÓN! Definir newDeviceToken ANTES de usarlo *****
-                 const newDeviceToken = crypto.randomBytes(16).toString('hex');
-                 // *************************************************************
-                 userInDb.deviceToken = newDeviceToken;
-                 responseData.deviceToken = newDeviceToken; // Añadir a la respuesta
-                 console.log(`Primer login para ${user.user}. Dispositivo registrado.`);
-                 return res.json(responseData); // Enviar respuesta completa
-             }
-             // Escenario 2: Login subsecuente, dispositivo correcto
-             if (userInDb.deviceToken === deviceToken) {
-                 console.log(`Login exitoso para ${user.user} en dispositivo conocido.`);
-                 return res.json(responseData); // Solo token y user
-             }
-             // Escenario 3: Dispositivo incorrecto
-             console.warn(`--- Login REJECTED for ${loginUser}: Device mismatch ---`);
-             return res.status(403).json({ message: 'Esta cuenta ya está registrada en otro dispositivo.' });
-
-         } else if (user.role === 'admin') {
-              console.log(`--- Login SUCCESS for ADMIN ${user.user} ---`);
-              return res.json({ user: userResponse, token: token }); // Solo token y user
+         // ***** ¡VERIFICACIONES AÑADIDAS! *****
+         if (!user) {
+             console.error("--- ERROR in /api/questions: req.fullUser no está definido. Middleware isStudent falló. ---");
+             return res.status(500).json({ message: "Error interno: Datos de usuario no encontrados." });
          }
+         if (!user.tests) {
+             console.warn(`--- WARN in /api/questions: user ${user.id} no tiene propiedad 'tests'. ---`);
+             user.tests = []; // Asignar array vacío para evitar crash
+         }
+         // ***** FIN VERIFICACIONES *****
 
-         console.warn(`--- Login FAILED for ${loginUser}: Unrecognized role ---`);
-         return res.status(403).json({ message: 'Rol de usuario no reconocido.' });
-     } catch(e) {
-         console.error("--- CRITICAL ERROR inside /api/login handler ---", e);
-         res.status(500).json({message: "Error interno procesando login"});
+         console.log(`--- Sanitizing questions for user: ${user.id} with tests: ${user.tests.join(', ')} ---`);
+         const allowedQuestions = sanitizeQuestions(questionBanks, user.tests);
+         
+         console.log("--- Successfully sanitized questions. Sending response. ---");
+         res.json(allowedQuestions);
+
+     } catch (error) {
+         console.error("--- CRITICAL ERROR inside /api/questions handler ---", error);
+         res.status(500).json({ message: "Error interno procesando la solicitud de preguntas." });
      }
  });
+ // --- FIN Endpoint /api/questions ---
 
- // --- Otros Endpoints Protegidos ---
- app.get('/api/session', authenticateToken, (req, res) => { console.log("--- GET /api/session OK ---"); /* ... (código sin cambios) ... */ });
- app.get('/api/questions', authenticateToken, isStudent, (req, res) => { console.log("--- GET /api/questions OK ---"); /* ... (código sin cambios) ... */ });
- app.get('/api/student/history', authenticateToken, isStudent, (req, res) => { console.log("--- GET /api/student/history OK ---"); /* ... (código sin cambios) ... */ });
- app.post('/api/submit', authenticateToken, isStudent, (req, res) => { console.log("--- POST /api/submit received ---"); /* ... (código con verificación) ... */ });
- app.get('/api/admin/stats', authenticateToken, isAdmin, (req, res) => { console.log("--- GET /api/admin/stats OK ---"); /* ... (código sin cambios) ... */ });
- app.get('/api/admin/users', authenticateToken, isAdmin, (req, res) => { console.log("--- GET /api/admin/users OK ---"); /* ... (código sin cambios) ... */ });
- app.post('/api/admin/release-device/:id', authenticateToken, isAdmin, (req, res) => { console.log(`--- POST /api/admin/release-device/${req.params.id} OK ---`); /* ... (código sin cambios) ... */ });
- app.post('/api/admin/users', authenticateToken, isAdmin, (req, res) => { console.log("--- POST /api/admin/users OK ---"); /* ... (código sin cambios) ... */ });
- app.put('/api/admin/users/:id', authenticateToken, isAdmin, (req, res) => { console.log(`--- PUT /api/admin/users/${req.params.id} OK ---`); /* ... (código sin cambios) ... */ });
- app.delete('/api/admin/users/:id', authenticateToken, isAdmin, (req, res) => { console.log(`--- DELETE /api/admin/users/${req.params.id} OK ---`); /* ... (código sin cambios) ... */ });
+ app.get('/api/student/history', authenticateToken, isStudent, (req, res) => { /* ... (sin cambios) ... */ });
+ app.post('/api/submit', authenticateToken, isStudent, (req, res) => { /* ... (sin cambios) ... */ });
+ // ... (Endpoints de Admin sin cambios) ...
 
  console.log("--- Routes defined ---");
 
