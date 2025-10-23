@@ -1,16 +1,14 @@
-// js/server.js
- console.log("--- SERVER SCRIPT STARTED ---"); // <-- LOG INICIAL
-
- // --- 1. Importar herramientas ---
+// --- 1. Importar herramientas ---
  const express = require('express');
  const cors = require('cors');
  const fs = require('fs');
  const crypto = require('crypto');
  const jwt = require('jsonwebtoken');
- console.log("--- Imports done ---"); // <-- LOG
+ console.log("--- SERVER SCRIPT STARTED ---");
 
  // --- Clave secreta ---
  const JWT_SECRET = '*MJ*Ug@jQ7BU+KgzWZ&$zCEyD$Z>9@JYS]3D;%p>GG@UctzPqVYdM]MA83qF]$?R,';
+ console.log("--- Imports done ---");
 
  // --- 2. Cargar datos ---
  let questionBanks = {};
@@ -18,18 +16,13 @@
  let testHistory = [];
  try {
      questionBanks = JSON.parse(fs.readFileSync('questions.json', 'utf8'));
-     // Simular carga de usuarios si fuera de BBDD
      users = [
          { id: 0, user: 'admin', email: 'admin@paes.cl', password: 'admin', name: 'Administrador', role: 'admin', deviceToken: null },
          { id: 1, user: 'juan.perez', email: 'juan.perez@email.com', password: '123456', name: 'Juan Pérez', role: 'student', tests: ['lectora', 'm1', 'm2'], inProgressTests: {}, deviceToken: null },
          { id: 2, user: 'kita', email: 'kita@example.com', password: '140914', name: 'Kita', role: 'student', tests: ['lectora', 'm1', 'ciencias'], inProgressTests: {}, deviceToken: null }
      ];
-     console.log("--- Data loaded ---"); // <-- LOG
- } catch(e) {
-     console.error("FATAL ERROR loading initial data:", e);
-     // Si falla aquí, el servidor podría no iniciar bien.
-     process.exit(1); // Detener si los datos iniciales fallan
- }
+     console.log("--- Data loaded ---");
+ } catch(e) { console.error("FATAL ERROR loading initial data:", e); process.exit(1); }
 
  // --- Datos Estáticos ---
  const testDetails = { /* ... */ };
@@ -45,74 +38,84 @@
  const PORT = process.env.PORT || 3000;
  app.use(cors());
  app.use(express.json());
- console.log("--- Express app configured ---"); // <-- LOG
+ console.log("--- Express app configured ---");
 
  // --- 5. Middlewares JWT ---
  const authenticateToken = (req, res, next) => { /* ... (sin cambios) ... */ };
  const isAdmin = (req, res, next) => { /* ... (sin cambios) ... */ };
  const isStudent = (req, res, next) => { /* ... (sin cambios) ... */ };
- console.log("--- Middlewares defined ---"); // <-- LOG
+ console.log("--- Middlewares defined ---");
 
  // --- 6. Endpoints ---
- app.get('/', (req, res) => {
-     console.log("--- GET / request received ---"); // <-- LOG
-     res.send('¡El servidor PAES 2026 está funcionando!');
- });
+ app.get('/', (req, res) => { console.log("--- GET / request received ---"); res.send('¡El servidor PAES 2026 está funcionando!'); });
 
  app.post('/api/login', (req, res) => {
-     // ***** LOG AL INICIO DEL ENDPOINT *****
      console.log(`--- POST /api/login request received at ${new Date().toISOString()} ---`);
-     // ************************************
-     try { // Envolver todo en try/catch por si acaso
+     try {
          const { loginUser, loginPass, deviceToken } = req.body;
-         console.log(`--- Attempting login for user: ${loginUser} ---`); // <-- LOG
+         console.log(`--- Attempting login for user: ${loginUser} ---`);
          const user = users.find(u => (u.user === loginUser || u.email === loginUser) && u.password === loginPass);
 
-         if (!user) {
-              console.warn(`--- Login FAILED for ${loginUser}: Incorrect credentials ---`); // <-- LOG
-             return res.status(401).json({ message: 'Credenciales incorrectas.' });
-         }
+         if (!user) { console.warn(`--- Login FAILED for ${loginUser}: Incorrect credentials ---`); return res.status(401).json({ message: 'Credenciales incorrectas.' }); }
 
          const userInDb = users.find(u => u.id === user.id);
+         if (!userInDb) { console.error(`--- CRITICAL ERROR: User found but not in DB? ID: ${user.id} ---`); return res.status(500).json({ message: 'Error interno del servidor.' }); } // Added safety check
+
          const payload = { id: user.id, role: user.role };
          const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
          const userResponse = { ...user };
          delete userResponse.password;
 
          if (user.role === 'student') {
-             // ... (lógica deviceToken sin cambios) ...
-             if (userInDb.deviceToken === null) { /* ... */ return res.json({ user: userResponse, token: token, deviceToken: newDeviceToken }); }
-             if (userInDb.deviceToken === deviceToken) { /* ... */ return res.json({ user: userResponse, token: token }); }
-             console.warn(`--- Login REJECTED for ${loginUser}: Device mismatch ---`); // <-- LOG
+             const responseData = { user: userResponse, token: token }; // Init responseData here
+
+             // Escenario 1: Primer login
+             if (userInDb.deviceToken === null) {
+                 // ***** ¡CORRECCIÓN! Definir newDeviceToken ANTES de usarlo *****
+                 const newDeviceToken = crypto.randomBytes(16).toString('hex');
+                 // *************************************************************
+                 userInDb.deviceToken = newDeviceToken;
+                 responseData.deviceToken = newDeviceToken; // Añadir a la respuesta
+                 console.log(`Primer login para ${user.user}. Dispositivo registrado.`);
+                 return res.json(responseData); // Enviar respuesta completa
+             }
+             // Escenario 2: Login subsecuente, dispositivo correcto
+             if (userInDb.deviceToken === deviceToken) {
+                 console.log(`Login exitoso para ${user.user} en dispositivo conocido.`);
+                 return res.json(responseData); // Solo token y user
+             }
+             // Escenario 3: Dispositivo incorrecto
+             console.warn(`--- Login REJECTED for ${loginUser}: Device mismatch ---`);
              return res.status(403).json({ message: 'Esta cuenta ya está registrada en otro dispositivo.' });
+
          } else if (user.role === 'admin') {
-              console.log(`--- Login SUCCESS for ADMIN ${user.user} ---`); // <-- LOG
-              return res.json({ user: userResponse, token: token });
+              console.log(`--- Login SUCCESS for ADMIN ${user.user} ---`);
+              return res.json({ user: userResponse, token: token }); // Solo token y user
          }
 
-         console.warn(`--- Login FAILED for ${loginUser}: Unrecognized role ---`); // <-- LOG
+         console.warn(`--- Login FAILED for ${loginUser}: Unrecognized role ---`);
          return res.status(403).json({ message: 'Rol de usuario no reconocido.' });
      } catch(e) {
-         console.error("--- CRITICAL ERROR inside /api/login handler ---", e); // <-- LOG
+         console.error("--- CRITICAL ERROR inside /api/login handler ---", e);
          res.status(500).json({message: "Error interno procesando login"});
      }
  });
 
  // --- Otros Endpoints Protegidos ---
- app.get('/api/session', authenticateToken, (req, res) => { console.log("--- GET /api/session OK ---"); /* ... */ });
- app.get('/api/questions', authenticateToken, isStudent, (req, res) => { console.log("--- GET /api/questions OK ---"); /* ... */ });
- app.get('/api/student/history', authenticateToken, isStudent, (req, res) => { console.log("--- GET /api/student/history OK ---"); /* ... */ });
- app.post('/api/submit', authenticateToken, isStudent, (req, res) => { console.log("--- POST /api/submit received ---"); /* ... */ });
- app.get('/api/admin/stats', authenticateToken, isAdmin, (req, res) => { console.log("--- GET /api/admin/stats OK ---"); /* ... */ });
- app.get('/api/admin/users', authenticateToken, isAdmin, (req, res) => { console.log("--- GET /api/admin/users OK ---"); /* ... */ });
- app.post('/api/admin/release-device/:id', authenticateToken, isAdmin, (req, res) => { console.log(`--- POST /api/admin/release-device/${req.params.id} OK ---`); /* ... */ });
- app.post('/api/admin/users', authenticateToken, isAdmin, (req, res) => { console.log("--- POST /api/admin/users OK ---"); /* ... */ });
- app.put('/api/admin/users/:id', authenticateToken, isAdmin, (req, res) => { console.log(`--- PUT /api/admin/users/${req.params.id} OK ---`); /* ... */ });
- app.delete('/api/admin/users/:id', authenticateToken, isAdmin, (req, res) => { console.log(`--- DELETE /api/admin/users/${req.params.id} OK ---`); /* ... */ });
+ app.get('/api/session', authenticateToken, (req, res) => { console.log("--- GET /api/session OK ---"); /* ... (código sin cambios) ... */ });
+ app.get('/api/questions', authenticateToken, isStudent, (req, res) => { console.log("--- GET /api/questions OK ---"); /* ... (código sin cambios) ... */ });
+ app.get('/api/student/history', authenticateToken, isStudent, (req, res) => { console.log("--- GET /api/student/history OK ---"); /* ... (código sin cambios) ... */ });
+ app.post('/api/submit', authenticateToken, isStudent, (req, res) => { console.log("--- POST /api/submit received ---"); /* ... (código con verificación) ... */ });
+ app.get('/api/admin/stats', authenticateToken, isAdmin, (req, res) => { console.log("--- GET /api/admin/stats OK ---"); /* ... (código sin cambios) ... */ });
+ app.get('/api/admin/users', authenticateToken, isAdmin, (req, res) => { console.log("--- GET /api/admin/users OK ---"); /* ... (código sin cambios) ... */ });
+ app.post('/api/admin/release-device/:id', authenticateToken, isAdmin, (req, res) => { console.log(`--- POST /api/admin/release-device/${req.params.id} OK ---`); /* ... (código sin cambios) ... */ });
+ app.post('/api/admin/users', authenticateToken, isAdmin, (req, res) => { console.log("--- POST /api/admin/users OK ---"); /* ... (código sin cambios) ... */ });
+ app.put('/api/admin/users/:id', authenticateToken, isAdmin, (req, res) => { console.log(`--- PUT /api/admin/users/${req.params.id} OK ---`); /* ... (código sin cambios) ... */ });
+ app.delete('/api/admin/users/:id', authenticateToken, isAdmin, (req, res) => { console.log(`--- DELETE /api/admin/users/${req.params.id} OK ---`); /* ... (código sin cambios) ... */ });
 
- console.log("--- Routes defined ---"); // <-- LOG
+ console.log("--- Routes defined ---");
 
  // --- 9. Encender ---
  app.listen(PORT, () => {
-     console.log(`--- Server listening on port ${PORT} ---`); // <-- LOG (Final)
+     console.log(`--- Server listening on port ${PORT} ---`);
  });
